@@ -22,3 +22,9 @@ jdbcTemplate.query(
 		return null;
 });
 ```
+
+## Running the tests
+
+You need to accept IBM's license by putting a file named `container-license-acceptance.txt` in the class path with the single line of content: `ibmcom/db2:11.5.0.0a`
+
+[I have created a Stack Overflow question about this.](https://stackoverflow.com/q/61681095/66686)
