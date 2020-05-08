@@ -29,3 +29,7 @@ build/
 
 ### VS Code ###
 .vscode/
+
+### don't accept licenses for other people.
+
+container-license-acceptance.txt
