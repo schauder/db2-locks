@@ -1,18 +1,14 @@
 package de.schauderhaft.db2locks;
 
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.RepeatedTest;
-import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcOperations;
 import org.springframework.transaction.support.TransactionTemplate;
 
-import javax.sql.DataSource;
-import java.util.Collections;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -36,48 +32,144 @@ class Db2locksApplicationTests {
 	CountDownLatch secondTransactionFinished = new CountDownLatch(1);
 
 	@BeforeEach
-void before() {
+	void before() {
+
 		template.update("delete from example", emptyMap());
+		template.update("insert into example (id, text) values (23, 'Insert')", emptyMap());
 	}
-	@Test
-	void contextLoads() {
 
-		String result = template.queryForObject("SELECT 'Alfred' AS NAME FROM SYSIBM.SYSDUMMY1", emptyMap(), String.class);
 
-		assertThat(result).isEqualTo("Alfred");
+	@RepeatedTest(10)
+	@Disabled
+	void noopDoesNotLock() throws InterruptedException {
 
+		Runnable obtainLock = () -> {
+		};
+
+		checkLockFails(obtainLock);
 	}
 
 	@RepeatedTest(10)
-	void orchestratedUpdate() throws InterruptedException {
+	void selectDoesNotLock() throws InterruptedException {
 
-		template.update("insert into example (id, text) values (:id, :text)", parameters(23, "Insert"));
+		Runnable obtainLock = () ->
+				template.getJdbcOperations().queryForObject("select 1 from example where id = 23", Long.class);
 
-		runInThread(() -> updateAndWait("First Update"));
+		checkLockFails(obtainLock);
+	}
+
+	@RepeatedTest(10)
+	void selectForUpdateDoesNotLock() throws InterruptedException {
+
+		Runnable obtainLock = () ->
+				template.getJdbcOperations().queryForObject("select id from example where id = 23 for update", Long.class);
+
+		checkLockFails(obtainLock);
+	}
+
+	@RepeatedTest(10)
+	void selectTextForUpdateDoesNotLock() throws InterruptedException {
+
+		Runnable obtainLock = () ->
+				template.getJdbcOperations().queryForObject("select text from example where id = 23 for update", String.class);
+
+		checkLockFails(obtainLock);
+	}
+
+	// ↧↧↧↧↧ things that work ↧↧↧↧↧
+
+	@RepeatedTest(10)
+	void updateDoesLock() throws InterruptedException {
+
+		Runnable obtainLock = () ->
+				template.update("update example set text = 'First Update' where id = 23", emptyMap());
+
+		checkLock(obtainLock);
+	}
+
+	@RepeatedTest(10)
+	void selectTextForKeepUpdateLocksDoesLock() throws InterruptedException {
+
+		Runnable obtainLock = () ->
+				template.getJdbcOperations().queryForObject("select text from example where id = 23 for update with rs use and keep update locks", String.class);
+
+		checkLock(obtainLock);
+	}
+
+	@RepeatedTest(10)
+	void selectIdForKeepUpdateLocksDoesLock() throws InterruptedException {
+
+		Runnable obtainLock = () ->
+				template.getJdbcOperations().queryForObject("select id from example where id = 23 for update with rs use and keep update locks", Integer.class);
+
+		checkLock(obtainLock);
+	}
+
+	@RepeatedTest(10)
+	void selectConsForKeepUpdateLocksDoesLock() throws InterruptedException {
+
+		Runnable obtainLock = () ->
+				template.getJdbcOperations().queryForObject("select 23 from example where id = 23 for update with rs use and keep update locks", Integer.class);
+
+		checkLock(obtainLock);
+	}
+
+	@RepeatedTest(10)
+	void executeWithParameterDoesNotLock() throws InterruptedException {
+
+		Runnable obtainLock = () ->
+				template.execute("select id from example where id = 23 for update with rs use and keep update locks", emptyMap(), ps -> {ps.execute(); return null;});
+
+		checkLockFails(obtainLock);
+	}
+
+	@RepeatedTest(10)
+	void executeDoesNotWork() throws InterruptedException {
+
+		Runnable obtainLock = () ->
+				template.getJdbcOperations().execute("select id from example where id = 23 for update with rs use and keep update locks");
+
+		checkLockFails(obtainLock);
+	}
+
+
+
+	private void checkLock(Runnable runnable) throws InterruptedException {
+		doTestRun(runnable);
+
+		assertThat(log).containsExactly("Obtain Lock", "wait", "Second Update");
+	}
+
+	private void checkLockFails(Runnable runnable) throws InterruptedException {
+		doTestRun(runnable);
+
+		assertThat(log).containsExactly("Obtain Lock", "Second Update", "wait");
+	}
+
+	private void doTestRun(Runnable runnable) throws InterruptedException {
+		runInThread(() -> executeAndWait(runnable, "Obtain Lock"));
 
 		runInThread(() -> waitAndUpdate("Second Update"));
 
 		firstQueryExecuted.await(100, TimeUnit.MILLISECONDS);
-		log.add("wait");
 		Thread.sleep(100);
+		log.add("wait");
 		firstTransactionFinished.countDown();
 		secondTransactionFinished.await(100, TimeUnit.MILLISECONDS);
-
-		assertThat(log).containsExactly("First Update", "wait", "Second Update");
 	}
 
 	private void runInThread(SafeRunnable runnable) {
 
 		new Thread(() -> {
 			tx.executeWithoutResult(tx -> {
-					runnable.run();
+				runnable.run();
 			});
 		}).start();
 	}
 
-	private void updateAndWait(String text) throws InterruptedException {
+	private void executeAndWait(Runnable runnable, String text) throws InterruptedException {
 
-		template.update("update example set text = :text where id = :id", parameters(23, text));
+		runnable.run();
 		log.add(text);
 		firstQueryExecuted.countDown();
 		firstTransactionFinished.await(100, TimeUnit.MILLISECONDS);
@@ -86,19 +178,8 @@ void before() {
 	private void waitAndUpdate(String text) throws InterruptedException {
 
 		firstQueryExecuted.await(100, TimeUnit.MILLISECONDS);
-		template.update("update example set text = :text where id = :id", parameters(23, text));
+		template.update("update example set text = '" + text + "' where id = 23", emptyMap());
 		log.add(text);
 		secondTransactionFinished.countDown();
 	}
-
-
-	private Map<String, ?> parameters(int id, String text) {
-
-		HashMap<String, Object> map = new HashMap<>();
-		map.put("id", id);
-		map.put("text", text);
-		return map;
-	}
-
-
 }
